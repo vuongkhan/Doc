@@ -105,8 +105,8 @@ Ví dụ:
 City 1 - 1.00
 City 2 - 3.25
 City 3 - 7.00 (Current)
-City 4 - 10.50
-City 5 - 14.40
+City 4 - 13.33
+City 5 - 26
 ```
 
 Dropdown chỉ dùng công thức progression để hiển thị.
