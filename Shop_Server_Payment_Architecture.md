@@ -61,7 +61,7 @@ Client không tự cộng Cash, không tự add item, không tự unlock DLC.
    - Retry pending receipt.
    - Log và test các case thanh toán.
 
-## 3. Phân rã task theo phần tính năng
+## 3. Phân rã tính năng
 
 Phần này dùng để đưa lên task board. Mỗi nhóm bên dưới là một epic lớn.
 
