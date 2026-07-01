@@ -4,170 +4,279 @@
 
 Thay thuật toán pick reward cũ (decay weight) bằng **controlled randomness** — đảm bảo tỷ lệ drop theo `BaseWeight` trong dài hạn, tránh streak ngẫu nhiên quá lệch.
 
-- **Thuật toán gốc:** Jason Frank & Malte Skarupke (2019) — [blog post](https://probablydance.com/2019/08/28/a-new-algorithm-for-controlled-randomness/)
-- **Tham chiếu:** Radoshaka (Unity/C# port + QoL features)
-- **UE implementation:** `FControlledRandomness`, tích hợp trong `URewardCenterSubsystem`
+| | |
+|---|---|
+| Thuật toán gốc | Jason Frank & Malte Skarupke (2019) — [blog post](https://probablydance.com/2019/08/28/a-new-algorithm-for-controlled-randomness/) |
+| Tham chiếu | Radoshaka (Unity/C# port + QoL features) |
+| UE implementation | `FControlledRandomness` + `URewardCenterSubsystem` |
 
 ---
 
 ## Tóm tắt cơ chế
 
-Mỗi item có **vị trí ảo** (`Mark`) trên một đường thẳng.
+Mỗi item có **vị trí ảo** (`Mark`) trên một đường thẳng. Mỗi nhóm **(ItemType + Rarity)** là một **randomize riêng** — không gom init cả city.
 
-1. **Init:** `Multiplier = maxWeight / BaseWeight` — item weight thấp → multiplier cao → nhảy xa hơn mỗi lần.
-2. **Pick:** Chọn item có `(Recycle, Mark)` **thấp nhất** trong candidates.
-3. **Sau pick:** Đẩy mark item đó lên: `Mark += random(Scale..1) × Multiplier` → tạm thời khó bị pick lại.
-4. **Wrap:** `Mark` quá lớn → `Recycle++`, mark quay vòng — roll mãi không overflow.
+1. **Init** — `Multiplier = maxWeight / BaseWeight` **trong từng nhóm (Type + Rarity)**. Item weight thấp → multiplier cao → nhảy xa hơn.
+2. **Pick** — Chọn item có `(Recycle, Mark)` **thấp nhất** trong candidates (đã filter type + rarity).
+3. **Sau pick** — `Mark += random(Scale..1) × Multiplier` → item vừa trúng tạm lùi.
+4. **Wrap** — `Mark >= 1,048,576` → `Recycle++`, mark quay vòng.
 
-**Kết quả:** Vẫn random, nhưng item vừa pick nhiều sẽ lùi, item lâu chưa pick sẽ lên — tỷ lệ dài hạn theo `BaseWeight`, không streak lệch, không "chết" như decay.
-
-**Reset:** `ForceResetRewardPool()` vẫn tồn tại (`BlueprintCallable`) nhưng **không được gọi** từ gameplay hay debug — pool tự cân, chỉ dùng thủ công khi cần fresh start (DT đổi, test, v.v.).
+**Kết quả:** Random có nhớ, tỷ lệ dài hạn theo `BaseWeight`, item không "chết" như decay.
 
 ---
 
-## Cách hoạt động
-
-### Ý tưởng cốt lõi
-
-Mỗi item trong pool được gán một **vị trí ảo** (`Mark`) trên một đường thẳng. Mỗi lần cần roll reward:
-
-1. Chọn item có vị trí **thấp nhất** (đi chậm nhất → sắp đến lượt).
-2. Sau khi pick, **đẩy** vị trí item đó lên phía trước (nhảy xa hơn → tạm thời khó bị pick lại).
-3. Item có `BaseWeight` thấp hơn nhảy **xa hơn** mỗi lần → ít được pick hơn, nhưng vẫn đúng tỷ lệ dài hạn.
-
-Khác với random thuần (`rand % totalWeight`), thuật toán này **có nhớ** — item vừa pick nhiều sẽ bị "đẩy lùi", item lâu chưa pick sẽ dần lên đầu.
-
-### Bước 1 — Tính Multiplier (lúc init pool)
+## Hai lớp random (post race)
 
 ```
-BiggestWeight = max(BaseWeight của tất cả item trong city pool)
+Lớp 1 — Chọn rarity (random thuần, không nhớ)
+  70% Common | 20% Uncommon | 10% Rare
+        ↓
+Lớp 2 — Chọn item trong nhóm (controlled randomness, có nhớ)
+  filter Type + Rarity → pick mark thấp nhất → push mark
+```
+
+Goal reward (T1/T2/T3) **chỉ định rarity** rồi roll trong nhóm đó — vẫn dùng cùng 1 pool/city.
+
+---
+
+## Nhóm randomize (Type + Rarity)
+
+**Yêu cầu:** mỗi rarity tier một randomize, không dồn 1 cục.
+
+**Cách làm:** Vẫn **1 pool data/city**, nhưng `Initialize` / `UpdateDistribution` chạy **từng nhóm**:
+
+```
+City pool (1 list item)
+  ├── Common + Visual      → InitializePerTypeRarityGroup
+  ├── Common + Performance → InitializePerTypeRarityGroup
+  ├── Rare + Visual        → InitializePerTypeRarityGroup
+  └── ...
+```
+
+| Bước | Phạm vi |
+|------|---------|
+| Init / recalc Multiplier | Per nhóm (Type + Rarity) |
+| Pick / push mark | Per nhóm (filter khi roll) |
+| Lưu save | Per item (`Mark`, `Recycle`); `Multiplier` **recalc** sau load |
+
+**Tại sao (Type + Rarity) chứ không chỉ Rarity?** — `RollItemFromRewardPool` luôn filter cả type lẫn rarity. Nhóm khớp đúng flow roll.
+
+---
+
+## Chi tiết thuật toán
+
+### Tính Multiplier (trong từng nhóm)
+
+```
+BiggestWeight = max(BaseWeight)   // CHỈ trong nhóm (Type, Rarity)
 Multiplier[i] = BiggestWeight / BaseWeight[i]
 ```
 
-| Item | BaseWeight | Multiplier | Ý nghĩa |
-|------|-----------|------------|---------|
-| A | 60 | 1.0 | Weight cao nhất → nhảy ngắn nhất → pick nhiều nhất |
-| B | 30 | 2.0 | Weight bằng nửa → nhảy gấp đôi → pick ít hơn ~2x |
-| C | 0 | 0 (ignored) | Không tham gia roll |
+| Item | BaseWeight | Multiplier (trong nhóm) |
+|------|-----------|-------------------------|
+| A | 60 | 1.0 — pick nhiều nhất |
+| B | 30 | 2.0 — pick ~ít hơn 2x |
+| C | 0 | ignored |
 
-Item có `BaseWeight <= 0` bị bỏ qua hoàn toàn.
-
-### Bước 2 — Khởi tạo Mark
+### Khởi tạo Mark
 
 ```
 Mark[i] = random(0..1) × Multiplier[i]
 Recycle[i] = 0
 ```
 
-Mark ban đầu random để lần pick đầu tiên cũng công bằng, không luôn chọn cùng một item.
+### Pick
 
-### Bước 3 — Pick (chọn item)
+Chọn item có **(Recycle, Mark) nhỏ nhất** trong candidates:
 
-Trong danh sách candidates (đã filter type/rarity), chọn item có **(Recycle, Mark) nhỏ nhất**:
+1. So sánh `Recycle` trước
+2. Nếu bằng nhau → so sánh `Mark`
 
-- So sánh `Recycle` trước (vòng wrap thấp hơn = đi trước).
-- Nếu `Recycle` bằng nhau → so sánh `Mark`.
-
-```
-Ví dụ candidates:
-  Item A: Recycle=0, Mark=1.2
-  Item B: Recycle=0, Mark=0.8  ← pick (Mark thấp nhất)
-  Item C: Recycle=0, Mark=3.5
-```
-
-### Bước 4 — Push Mark (sau khi pick)
-
-Item vừa được pick sẽ nhảy về phía trước:
+### Push Mark (sau grant)
 
 ```
-jump = random(Scale, 1.0) × Multiplier
+jump = random(ControlledRandomnessScale, 1.0) × Multiplier
 Mark += jump
 ```
 
-- `Scale` (`ControlledRandomnessScale`, default `0.1`): điều chỉnh độ ngẫu nhiên của bước nhảy.
-  - `0` → jump gần cố định, spacing đều.
-  - `1` → jump hoàn toàn random trong khoảng `[Multiplier, Multiplier]`.
+`ControlledRandomnessScale` (default `0.1`): `0` = spacing đều, `1` = random hơn.
 
-Item weight thấp (Multiplier cao) nhảy xa hơn → tạm thời tụt xuống cuối hàng.
-
-### Bước 5 — Recycle (wrap mark)
-
-Khi `Mark >= 1,048,576` (`RecycleMark`):
+### Recycle (wrap)
 
 ```
+RecycleMark = 1,048,576
 Recycle += floor(Mark / RecycleMark)
 Mark     = Mark mod RecycleMark
 ```
 
-Cho phép mark chạy vô hạn mà không overflow float, vẫn so sánh đúng thứ tự qua cặp `(Recycle, Mark)`.
-
-### Ví dụ đơn giản (2 item, Scale = 0.1)
-
-Pool: **Red** (weight 50), **Blue** (weight 50) → cả hai Multiplier = 1.0.
+### Ví dụ trong 1 nhóm (2 item, weight 50/50)
 
 ```
-Lần 1: Red Mark=0.3, Blue Mark=0.7  → pick Red  → Red Mark += ~0.5 → Red=0.8
-Lần 2: Red Mark=0.8, Blue Mark=0.7  → pick Blue → Blue Mark += ~0.6 → Blue=1.3
+Lần 1: Red Mark=0.3, Blue Mark=0.7  → pick Red  → Red += ~0.5
+Lần 2: Red Mark=0.8, Blue Mark=0.7  → pick Blue → Blue += ~0.6
 Lần 3: Red Mark=0.8, Blue Mark=1.3  → pick Red  → ...
 ```
 
-Kết quả: xen kẽ Red/Blue thay vì streak 5 Red liên tiếp như random thuần.
-
-Pool lệch weight: **Common** (60) vs **Rare** (20) → Rare Multiplier = 3.0, mỗi lần pick Rare nhảy gấp 3 lần Common → Rare xuất hiện ~1/3 số lần Common trong dài hạn.
+Xen kẽ thay vì streak 5 Red liên tiếp.
 
 ---
 
-## Thay đổi struct `FRewardPoolEntryItem`
+## Struct `FRewardPoolEntryItem`
 
-| Bỏ | Thêm |
-|----|------|
-| `TimesPicked` | `Mark` (float) — vị trí trên distribution line |
-| `EffectiveWeight` | `Recycle` (int32) — số vòng wrap mark |
-| | `Multiplier` (float, runtime) — `BiggestWeight / BaseWeight` |
+| Bỏ (decay cũ) | Thêm (controlled randomness) |
+|---------------|------------------------------|
+| `TimesPicked` | `Mark` (float) |
+| `EffectiveWeight` | `Recycle` (int32) |
+| | `Multiplier` (float, runtime) |
 
 **Giữ nguyên:** `PoolEntryID`, `CityID`, `ItemMasterID`, `BaseWeight`
 
-`FCityLootPoolRow` và các struct reward khác **không đổi**.
+`FCityLootPoolRow` và struct reward khác **không đổi**.
 
 ---
 
-## Files chính
+## Files
 
 | File | Vai trò |
 |------|---------|
-| `ControlledRandomness.h/.cpp` | Core algorithm: `Initialize`, `PickByLowestMark`, `PushMarkForward`, `UpdateDistribution` |
-| `RewardCenterSubsystem.h/.cpp` | Tích hợp pool, save/load, roll reward |
-| `RewardCenterSaveGame.h` | Lưu `RewardPoolEntries` (Mark + Recycle qua struct) |
+| `ControlledRandomness.h/.cpp` | Core: init/pick/push, **group per Type+Rarity** |
+| `RewardCenterSubsystem.h/.cpp` | Pool, save/load, roll reward |
+| `RewardCenterSaveGame.h` | Lưu `RewardPoolEntries` |
 
 ---
 
-## Flow pick item
+## Flow runtime
 
 ```
-BuildRewardPoolFromDataTable()
-  └─ FControlledRandomness::Initialize()   // tính Multiplier, gán Mark ngẫu nhiên
+SetupRewardCenter / ForceResetRewardPool
+  └─ BuildRewardPoolFromDataTable()
+       └─ InitializePerTypeRarityGroup(Items, CityLootPoolDataTable)
 
-RollItemFromRewardPool()
-  └─ GetRewardPoolCandidates()             // filter type/rarity từ DataTable
-  └─ PickItemByLowestMark()                // chọn item có (Recycle, Mark) nhỏ nhất
+SetupRewardCenter + có save
+  └─ SyncRewardPoolEntries()
+       ├─ load Mark + Recycle (skip nếu Multiplier == 0 → save cũ)
+       └─ UpdateDistributionPerTypeRarityGroup(Items, CityLootPoolDataTable)
 
-Sau khi grant reward
-  └─ PushMarkForward(CityID, ItemMasterID) // đẩy mark item vừa pick
+Mỗi token reward
+  └─ RollItemFromRewardPool(City, Type, Rarity, Source)
+       ├─ GetRewardPoolCandidates()     // filter Type + Rarity
+       ├─ PickByLowestMark()
+       └─ (sau grant) PushMarkForward()
 ```
 
-**Config:** `ControlledRandomnessScale` (default `0.1`) — `0` = spacing gần deterministic, `1` = random hơn.
+---
+
+## Review nhanh (checklist)
+
+Đọc theo thứ tự dưới đây để verify implementation hợp lý. **3 file chính:**
+
+| File | Vai trò |
+|------|---------|
+| `ControlledRandomness.cpp` | Core algorithm + group per (Type, Rarity) |
+| `RewardCenterSubsystem.cpp` | Build pool, sync save, roll, push |
+| `RewardCenterSubsystem.h` | Struct `FRewardPoolEntryItem` |
+
+### 1. Fix yêu cầu “mỗi nhóm 1 randomize” ⭐
+
+**Gom nhóm** — `BuildTypeRarityGroupIndices` (`ControlledRandomness.cpp` ~L14–41):
+
+```
+Key = (ItemCategory, RarityTier) từ CityLootPoolDataTable
+→ TMap<FTypeRarityKey, TArray<int32>>
+```
+
+**Init per nhóm** — `InitializePerTypeRarityGroup` (~L73–82):
+
+- `RunOnEachTypeRarityGroup` tách subset → gọi `Initialize(GroupItems)` → ghi lại vào pool gốc
+- `CalculateMultipliers` chỉ thấy item **trong nhóm** → `max(BaseWeight)` đúng scope
+
+**Gọi lúc build** — `BuildRewardPoolFromDataTable` (`RewardCenterSubsystem.cpp` ~L90–94):
+
+```
+for each city pool:
+  InitializePerTypeRarityGroup(Items, CityLootPoolDataTable)
+```
+
+**Sync save** — `SyncRewardPoolEntries` (~L99–132):
+
+```
+load Mark + Recycle (skip nếu save cũ)
+→ UpdateDistributionPerTypeRarityGroup  // recalc Multiplier per nhóm
+```
+
+### 2. Core algorithm ⭐
+
+| Hàm | File | Cần check |
+|-----|------|-----------|
+| `CalculateMultipliers` | `ControlledRandomness.cpp` ~L178–191 | `Multiplier = maxWeight / BaseWeight`; weight 0 → ignored |
+| `Initialize` | ~L95–112 | Random mark `0..1 × Multiplier`; ignored → `Mark = Max` |
+| `PickByLowestMark` | ~L114–140 | So `(Recycle, Mark)` thấp nhất; bỏ ignored |
+| `PushMarkForward` | ~L142–161 | `jump = random(Scale..1) × Multiplier`; wrap tại `RecycleMark` |
+| `UpdateDistribution` | ~L164–176 | Recalc multiplier; **không** reset mark/recycle |
+
+### 3. Roll flow ⭐
+
+| Hàm | File | Cần check |
+|-----|------|-----------|
+| `GetRewardPoolCandidates` | `RewardCenterSubsystem.cpp` ~L135–155 | Filter `ItemCategory == RewardType` **và** `RarityTier == RarityTier` |
+| `RollItemFromRewardPool` | ~L163–172 | Candidates → `PickByLowestMark` |
+| `PushMarkForward` | ~L785–798 | Tìm item **trong `RewardPoolEntries` persistent** → push mark |
+
+**Lưu ý:** `PickByLowestMark` chạy trên **copy** candidates; state chỉ đổi khi `PushMarkForward` ghi vào pool thật.
+
+**Callers push mark** — `GenerateRewardsByRequests` (~L361) và path grant khác (~L408): gọi `PushMarkForward(CityID, ItemMasterID)` sau khi item được grant thành công.
+
+### 4. Struct & save
+
+**Struct** — `RewardCenterSubsystem.h` ~L71–99:
+
+```
+BaseWeight  — từ DataTable (config)
+Mark        — runtime, lưu save
+Recycle     — runtime, lưu save
+Multiplier  — runtime, KHÔNG load từ save (recalc per nhóm)
+```
+
+**Migration save cũ** — `SyncRewardPoolEntries` ~L121–124:
+
+```
+if (loaded Multiplier <= SMALL_NUMBER) → skip load Mark/Recycle
+→ giữ mark fresh từ InitializePerTypeRarityGroup
+```
+
+### Checklist review
+
+| # | Câu hỏi | Pass nếu |
+|---|---------|----------|
+| 1 | Init có per (Type+Rarity) không? | `InitializePerTypeRarityGroup` gọi từ `BuildRewardPoolFromDataTable` |
+| 2 | Multiplier max trong nhóm, không cả city? | `CalculateMultipliers` chỉ qua `RunOnEachTypeRarityGroup` |
+| 3 | Pick filter đúng nhóm? | `GetRewardPoolCandidates` check cả Type **và** Rarity |
+| 4 | Push mark trên pool persistent? | `PushMarkForward` sửa slot trong `RewardPoolEntries` |
+| 5 | Save load Mark/Recycle, recalc Multiplier? | `Sync` → `UpdateDistributionPerTypeRarityGroup` |
+| 6 | Save cũ xử lý ok? | `Multiplier == 0` → skip, dùng init mới |
+| 7 | Item weight 0 không pick? | `IsIgnoredItem` → `Multiplier <= 0` |
+| 8 | Scale configurable? | `ControlledRandomnessScale` (default 0.1) truyền vào push |
+
+### Điểm cần chú ý khi review
+
+1. **Nhóm khớp flow roll** — Key `(Type, Rarity)` khớp filter trong `GetRewardPoolCandidates`, không chỉ Rarity.
+2. **Không reset pool trong debug** — `ForceResetRewardPool` giữ API nhưng không gọi từ `ResetCityProgression` (pool tự cân bằng).
+3. **Hai lớp random** — Lớp 1 (rarity %) và lớp 2 (controlled) độc lập; doc trên mô tả đúng flow post-race.
 
 ---
 
 ## Save / migration
 
-- **Lưu mới:** `Mark`, `Recycle`, `Multiplier` trên từng `FRewardPoolEntryItem`
-- **Save cũ** (chỉ có `TimesPicked` / `EffectiveWeight`): `SyncRewardPoolEntries` bỏ qua entry có `Multiplier == 0` → dùng marks mới từ `Initialize()`
-- `ForceResetRewardPool()` — rebuild pool + init marks từ đầu (API giữ lại, hiện không gọi từ code)
+| Tình huống | Hành vi |
+|------------|---------|
+| Save mới | Lưu `Mark`, `Recycle` per item (`Multiplier` có trong struct nhưng **recalc** khi load) |
+| Save cũ (`Multiplier == 0`) | Skip load Mark/Recycle → giữ mark từ `InitializePerTypeRarityGroup` |
+| Sau sync | `UpdateDistributionPerTypeRarityGroup` — recalc `Multiplier` per nhóm, giữ `Mark`/`Recycle` |
+| `ForceResetRewardPool()` | Rebuild + init lại (API giữ, **không gọi** từ gameplay/debug) |
 
 ---
 
-## API đã thay đổi
+## API thay đổi (`URewardCenterSubsystem`)
 
 | Bỏ | Thêm |
 |----|------|
@@ -177,12 +286,25 @@ Sau khi grant reward
 | `RecalculateEffectiveWeight` | — |
 | `DecayFactor` | `ControlledRandomnessScale` |
 
+### API mới (`FControlledRandomness`)
+
+| Hàm | Mục đích |
+|-----|----------|
+| `InitializePerTypeRarityGroup` | Init mark/multiplier per (Type, Rarity) |
+| `UpdateDistributionPerTypeRarityGroup` | Recalc multiplier per nhóm sau load save |
+| `Initialize` | Init 1 nhóm (gọi nội bộ) |
+| `PickByLowestMark` | Chọn mark thấp nhất |
+| `PushMarkForward` | Đẩy mark sau pick |
+| `UpdateDistribution` | Recalc multiplier 1 nhóm (gọi nội bộ) |
+
 ---
 
 ## So sánh hành vi
 
 | | Cũ (Decay) | Mới (Controlled Randomness) |
 |--|-----------|----------------------------|
-| Cơ chế | `EffectiveWeight = BaseWeight × DecayFactor^TimesPicked` | Pick mark thấp nhất, push mark sau mỗi lần pick |
-| Item pick nhiều | Weight giảm vĩnh viễn | Mark tăng tạm thời, tỷ lệ dài hạn vẫn theo `BaseWeight` |
-| Randomness | Roll % theo weight | Mark + scale + multiplier |
+| Cơ chế | `BaseWeight × DecayFactor^TimesPicked` | Pick mark thấp nhất, push mark |
+| Item pick nhiều | Weight → 0, gần "chết" | Mark tăng tạm, quay lại được |
+| Init scope | Cả city (effective weight) | Per nhóm (Type + Rarity) |
+| Cần reset cứu pool | Có (debug) | Không bắt buộc |
+| Randomness | Roll % mỗi lần | Mark + multiplier + scale |
