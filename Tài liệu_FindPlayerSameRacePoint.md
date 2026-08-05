@@ -55,14 +55,6 @@ Notify roster (code 220): tên + RP cho mọi người trong room
 
 ---
 
-## Expand (solo only)
-
-Mỗi ~2s server quét:
-
-- Chỉ **solo** (room 1 người) được kéo vào room khác còn ghế nếu RP fit min-window.
-
----
-
 ## Client làm gì
 
 | Việc | Chi tiết |
