@@ -18,7 +18,7 @@ Luồng hoạt động:
 
 ## 2. Cách thêm và sửa Map Pool
 
-Hệ thống hỗ trợ cập nhật danh sách map cực kì linh hoạt (hot-reload không cần tắt server). Dưới đây là 3 cách để thay đổi hoặc thêm map mới vào tính năng Random Quick Match:
+Hệ thống hỗ trợ cập nhật danh sách map linh hoạt (hot-reload không cần tắt server). Dưới đây là 3 cách để thay đổi hoặc thêm map mới vào tính năng Random Quick Match:
 
 ### Cách 1: Thông qua Nakama RPC (Code / API)
 - Backend cung cấp một RPC có tên `prototype_update_map_pool` dành riêng cho Admin/Server.
